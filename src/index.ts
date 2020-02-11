@@ -10,6 +10,7 @@ import { loadConfig } from './util';
 program
   .version('0.0.1')
   .option('-p, --project <file>', 'path to tsconfig.json')
+  .option('-n, --noEnforcePaths', 'use baseurl only')
   .option('-s, --src <path>', 'source root path')
   .option('-o, --out <path>', 'output root path')
   .option('-v, --verbose', 'output logs');
@@ -22,11 +23,12 @@ program.on('--help', () => {
 
 program.parse(process.argv);
 
-const { project, src, out, verbose } = program as {
+const { project, src, out, verbose, noEnforcePaths } = program as {
   project?: string;
   src?: string;
   out?: string;
   verbose?: boolean;
+  noEnforcePaths?: boolean;
 };
 
 if (!project) {
@@ -57,7 +59,7 @@ const { baseUrl, outDir, paths } = loadConfig(configFile);
 if (!baseUrl) {
   throw new Error('compilerOptions.baseUrl is not set');
 }
-if (!paths) {
+if (!paths && !noEnforcePaths) {
   throw new Error('compilerOptions.paths is not set');
 }
 if (!outDir) {
@@ -75,17 +77,48 @@ verboseLog(`basePath: ${basePath}`);
 const outPath = outRoot || resolve(basePath, outDir);
 verboseLog(`outPath: ${outPath}`);
 
+const basePaths = sync(`${baseUrl}/**`);
+
+const resolveWithBasePath = (file: string) => {
+  const relative = file
+    .split('/')
+    .slice(1)
+    .join('/');
+
+  const folders = relative.split('/');
+
+  const suffix = folders[folders.length - 1].match(/index.(ts|js)/)
+    ? folders.slice(0, folders.length - 1).join('/')
+    : folders.join('/');
+
+  return {
+    prefix: suffix.split('/')[0],
+    aliasPaths: [
+      `${baseUrl}/${suffix
+        .split('/')
+        .slice(0, 1)
+        .join('/')}`,
+    ],
+  };
+};
+
+const baseUrlRels = basePaths.map(resolveWithBasePath);
+
 const outFileToSrcFile = (x: string): string =>
   resolve(srcRoot, relative(outPath, x));
 
-const aliases = Object.keys(paths)
-  .map((alias) => ({
-    prefix: alias.replace(/\*$/, ''),
-    aliasPaths: paths[alias as keyof typeof paths].map((p) =>
-      resolve(basePath, p.replace(/\*$/, ''))
-    ),
-  }))
-  .filter(({ prefix }) => prefix);
+const aliases =
+  paths !== undefined
+    ? Object.keys(paths)
+        .map((alias) => ({
+          prefix: alias.replace(/\*$/, ''),
+          aliasPaths: paths[alias as keyof typeof paths].map((p) =>
+            resolve(basePath, p.replace(/\*$/, ''))
+          ),
+        }))
+        .filter(({ prefix }) => prefix)
+    : baseUrlRels;
+
 verboseLog(`aliases: ${JSON.stringify(aliases, null, 2)}`);
 
 const toRelative = (from: string, x: string): string => {
@@ -127,7 +160,6 @@ const absToRel = (modulePath: string, outFile: string): string => {
           return rel;
         }
       }
-      console.log(`could not replace ${modulePath}`);
     }
   }
   return modulePath;
@@ -159,10 +191,12 @@ const replaceAlias = (text: string, outFile: string): string =>
     );
 
 // import relative to absolute path
-const files = sync(`${outPath}/**/*.{js,jsx,ts,tsx}`, {
+const files = sync(`${outPath}/**/*.{js,jsx,ts,tsx, d.ts}`, {
   dot: true,
   noDir: true,
 } as any).map((x) => resolve(x));
+
+console.log(files.map((file) => file.split('/')[file.length - 1]));
 
 let changedFileCount = 0;
 
